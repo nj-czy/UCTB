@@ -6,7 +6,7 @@ import numpy as np
 from UCTB.dataset import NodeTrafficLoader
 from UCTB.model import ST_MGCN
 from UCTB.evaluation import metric
-
+from UCTB.preprocess.GraphGenerator import GraphGenerator
 
 def stmeta_param_parser():
     import argparse
@@ -26,6 +26,7 @@ def stmeta_param_parser():
     # Training data parameters
     parser.add_argument('--DataRange', default='All')
     parser.add_argument('--TrainDays', default='365')
+    parser.add_argument('--test_ratio', default=0.1, type=float)
     # Graph parameter
     parser.add_argument('--TC', default='0', type=float)
     parser.add_argument('--TD', default='1000', type=float)
@@ -40,11 +41,11 @@ def stmeta_param_parser():
     # device parameter
     parser.add_argument('--Device', default='0', type=str)
     # version control
-    parser.add_argument('--CodeVersion', default='V0')
-    # Merge times
+    parser.add_argument('--CodeVersion', default='V')
+    # Merge parameter
     parser.add_argument('--MergeIndex', default=6, type=int)
+    parser.add_argument('--MergeWay', default='sum', type=str)
     return parser
-
 
 parser = stmeta_param_parser()
 args = vars(parser.parse_args())
@@ -72,16 +73,23 @@ else:
 
 # Config data loader
 data_loader = NodeTrafficLoader(dataset=args['Dataset'], city=args['City'],
+                                test_ratio=float(args['test_ratio']),
                                 data_range=args['DataRange'], train_data_length=args['TrainDays'],
                                 closeness_len=int(args['CT']), period_len=int(args['PT']), trend_len=int(args['TT']),
-                                threshold_interaction=args['TI'], threshold_distance=args['TD'],
-                                threshold_correlation=args['TC'], graph=args['Graph'], with_lm=True, normalize=True, MergeIndex=args['MergeIndex'],
-                                MergeWay="max" if args["Dataset"] == "ChargeStation" else "sum")
+                                normalize=True, MergeIndex=args['MergeIndex'],
+                                MergeWay=args["MergeWay"])
+
+# build graphs
+graph_obj = GraphGenerator(graph=args['Graph'],
+                           data_loader=data_loader,
+                           threshold_distance=args['TD'],
+                           threshold_correlation=args['TC'],
+                           threshold_interaction=args['TI'])
 
 ST_MGCN_Obj = ST_MGCN(T=int(args['CT']) + int(args['PT']) + int(args['TT']),
                       input_dim=1,
                       external_dim=data_loader.external_dim,
-                      num_graph=data_loader.LM.shape[0],
+                      num_graph=graph_obj.LM.shape[0],
                       gcl_k=args['K'],
                       gcl_l=args['L'],
                       lstm_units=args['LSTMUnits'],
@@ -101,7 +109,7 @@ if args['Train'] == 'True':
     ST_MGCN_Obj.fit(traffic_flow=np.concatenate((np.transpose(data_loader.train_closeness, [0, 2, 1, 3]),
                                                  np.transpose(data_loader.train_period, [0, 2, 1, 3]),
                                                  np.transpose(data_loader.train_trend, [0, 2, 1, 3])), axis=1),
-                    laplace_matrix=data_loader.LM,
+                    laplace_matrix=graph_obj.LM,
                     target=data_loader.train_y,
                     external_feature= None,
                     early_stop_method='t-test',
@@ -119,7 +127,7 @@ ST_MGCN_Obj.load(code_version)
 prediction = ST_MGCN_Obj.predict(traffic_flow=np.concatenate((np.transpose(data_loader.test_closeness, [0, 2, 1, 3]),
                                                              np.transpose(data_loader.test_period, [0, 2, 1, 3]),
                                                              np.transpose(data_loader.test_trend, [0, 2, 1, 3])), axis=1),
-                                 laplace_matrix=data_loader.LM,
+                                 laplace_matrix=graph_obj.LM,
                                  external_feature=None,
                                  sequence_length=data_loader.test_sequence_len,
                                  output_names=['prediction'],

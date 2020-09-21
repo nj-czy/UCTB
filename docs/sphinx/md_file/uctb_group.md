@@ -49,7 +49,7 @@ ______
 
 ```From Nov 2019, till now.```
 
-Undergraduate student in Xidian University.
+Ph.D student in Peking University.
 
 Email:  chenliyue2019@gmail.com
 

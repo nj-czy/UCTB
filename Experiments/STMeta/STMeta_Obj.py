@@ -3,12 +3,16 @@ import nni
 import yaml
 import argparse
 import GPUtil
+import numpy as np
+from UCTB.dataset import DataSet
 
 from UCTB.dataset import NodeTrafficLoader
 from UCTB.model import STMeta
 from UCTB.evaluation import metric
 from UCTB.preprocess.time_utils import is_work_day_china, is_work_day_america
-from UCTB.utils import save_predict_in_dataset
+
+from UCTB.preprocess.GraphGenerator import GraphGenerator
+from UCTB.preprocess import Normalizer, SplitData
 #####################################################################
 # argument parser
 parser = argparse.ArgumentParser(description="Argument Parser")
@@ -37,32 +41,34 @@ if nni_params:
 #####################################################################
 # Generate code_version
 code_version = '{}_C{}P{}T{}_G{}_K{}L{}_F{}_{}'.format(args['model_version'],
-                                                   args['closeness_len'], args['period_len'],
-                                                   args['trend_len'],
-                                                   ''.join([e[0] for e in args['graph'].split('-')]),
-                                                   args['gcn_k'], args['gcn_layers'],int(args["MergeIndex"])*5, args['mark'])
+                                                       args['closeness_len'], args['period_len'],args['trend_len'],
+                                                       ''.join([e[0] for e in args['graph'].split('-')]),
+                                                       args['gcn_k'], args['gcn_layers'], int(args["MergeIndex"])*5, args['mark'])
 model_dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model_dir')
 model_dir_path = os.path.join(model_dir_path, args['group'])
 #####################################################################
-# Config data loader
+
 data_loader = NodeTrafficLoader(dataset=args['dataset'], city=args['city'],
                                 data_range=args['data_range'], train_data_length=args['train_data_length'],
-                                test_ratio=0.1,
+                                test_ratio=float(args['test_ratio']),
                                 closeness_len=args['closeness_len'],
                                 period_len=args['period_len'],
                                 trend_len=args['trend_len'],
-                                threshold_distance=args['threshold_distance'],
-                                threshold_correlation=args['threshold_correlation'],
-                                threshold_interaction=args['threshold_interaction'],
                                 normalize=args['normalize'],
-                                graph=args['graph'],
-                                with_lm=True, with_tpe=True if args['st_method'] == 'gal_gcn' else False,
+                                with_tpe=True if args['st_method'] == 'gal_gcn' else False,
                                 workday_parser=is_work_day_america if args['dataset'] == 'Bike' else is_work_day_china,
                                 MergeIndex=args['MergeIndex'],
-                                MergeWay="max" if args["dataset"] == "ChargeStation" else "sum")
+                                MergeWay=args["MergeWay"])
 
-print("TimeFitness",data_loader.dataset.time_fitness)
-print("TimeRange",data_loader.dataset.time_range)
+# build graphs
+graph_obj = GraphGenerator(graph=args['graph'],
+                           data_loader=data_loader,
+                           threshold_distance=args['threshold_distance'],
+                           threshold_correlation=args['threshold_correlation'],
+                           threshold_interaction=args['threshold_interaction'])
+
+print("TimeFitness", data_loader.dataset.time_fitness)
+print("TimeRange", data_loader.dataset.time_range)
 
 de_normalizer = None if args['normalize'] is False else data_loader.normalizer.min_max_denormal
 
@@ -77,8 +83,9 @@ else:
     else:
         current_device = str(deviceIDs[0])
 
+
 STMeta_obj = STMeta(num_node=data_loader.station_number,
-                    num_graph=data_loader.LM.shape[0],
+                    num_graph=graph_obj.LM.shape[0],
                     external_dim=data_loader.external_dim,
                     closeness_len=args['closeness_len'],
                     period_len=args['period_len'],
@@ -119,7 +126,7 @@ if args['train']:
     STMeta_obj.fit(closeness_feature=data_loader.train_closeness,
                    period_feature=data_loader.train_period,
                    trend_feature=data_loader.train_trend,
-                   laplace_matrix=data_loader.LM,
+                   laplace_matrix=graph_obj.LM,
                    target=data_loader.train_y,
                    external_feature=data_loader.train_ef,
                    sequence_length=data_loader.train_sequence_len,
@@ -140,7 +147,7 @@ STMeta_obj.load(code_version)
 prediction = STMeta_obj.predict(closeness_feature=data_loader.test_closeness,
                                 period_feature=data_loader.test_period,
                                 trend_feature=data_loader.test_trend,
-                                laplace_matrix=data_loader.LM,
+                                laplace_matrix=graph_obj.LM,
                                 target=data_loader.test_y,
                                 external_feature=data_loader.test_ef,
                                 output_names=('prediction', ),
@@ -153,8 +160,10 @@ if de_normalizer:
     test_prediction = de_normalizer(test_prediction)
     data_loader.test_y = de_normalizer(data_loader.test_y)
 
-test_rmse, test_mape = metric.rmse(prediction=test_prediction, target=data_loader.test_y, threshold=0),\
-                       metric.mape(prediction=test_prediction, target=data_loader.test_y, threshold=0)
+# test_rmse = metric.rmse(prediction=test_prediction, target=data_loader.test_y, threshold=0),\
+#     metric.mape(prediction=test_prediction,target=data_loader.test_y, threshold=0)
+
+test_rmse = metric.rmse(prediction=test_prediction, target=data_loader.test_y, threshold=0)
 
 # Evaluate
 val_loss = STMeta_obj.load_event_scalar('val_loss')
@@ -165,17 +174,15 @@ if de_normalizer:
     best_val_loss = de_normalizer(best_val_loss)
 
 print('Best val result', best_val_loss)
-print('Test result', test_rmse, test_mape)
-
-# save_predict_in_dataset(data_loader,test_prediction,code_version)
-
+# print('Test result', test_rmse, test_mape)
+print('Test result', test_rmse)
 time_consumption = [val_loss[e][0] - val_loss[e-1][0] for e in range(1, len(val_loss))]
 time_consumption = sum([e for e in time_consumption if e < (min(time_consumption) * 10)]) / 3600
 print('Converged using %.2f hour / %s epochs' % (time_consumption, STMeta_obj._global_step))
-senInfo(code_version)
-if nni_params:
-    nni.report_final_result({
-        'default': best_val_loss,
-        'test-rmse': test_rmse,
-        'test-mape': test_mape
-    })
+
+# if nni_params:
+#     nni.report_final_result({
+#         'default': best_val_loss,
+#         'test-rmse': test_rmse,
+#         'test-mape': test_mape
+#     })

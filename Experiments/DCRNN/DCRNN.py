@@ -5,8 +5,18 @@ from UCTB.dataset import NodeTrafficLoader
 from UCTB.model import DCRNN
 from UCTB.evaluation import metric
 
+from UCTB.preprocess.GraphGenerator import GraphGenerator
 
 class my_data_loader(NodeTrafficLoader):
+
+    def __init__(self, **kwargs):
+
+        super(my_data_loader, self).__init__(**kwargs) 
+        
+        # generate LM
+        graph_obj = GraphGenerator(graph=kwargs['graph'], data_loader=self)
+        self.AM = graph_obj.AM
+        self.LM = graph_obj.LM
 
     def diffusion_matrix(self, filter_type='random_walk'):
         def calculate_random_walk_matrix(adjacent_mx):
@@ -16,7 +26,6 @@ class my_data_loader(NodeTrafficLoader):
             d_mat_inv = np.diag(d_inv)
             random_walk_mx = d_mat_inv.dot(adjacent_mx)
             return random_walk_mx
-        # assert len(self.AM) == 1
 
         diffusion_matrix = []
         if filter_type == "random_walk":
@@ -45,6 +54,7 @@ def param_parser():
     # Training data parameters
     parser.add_argument('--DataRange', default='All')
     parser.add_argument('--TrainDays', default='365')
+    parser.add_argument('--test_ratio', default=0.1, type=float)
     # Graph parameter
     parser.add_argument('--TC', default='0', type=float)
     parser.add_argument('--TD', default='1000', type=float)
@@ -59,9 +69,11 @@ def param_parser():
     # device parameter
     parser.add_argument('--Device', default='0', type=str)
     # version control
-    parser.add_argument('--CodeVersion', default='V0')
-    # Merge times
-    parser.add_argument('--MergeIndex', default=1, type=int)
+    parser.add_argument('--Group', default='DebugGroup')
+    parser.add_argument('--CodeVersion', default='ST_MGCN_Debug')
+    # Merge parameter
+    parser.add_argument('--MergeIndex', default=6, type=int)
+    parser.add_argument('--MergeWay', default='sum', type=str)
     return parser
 
 
@@ -73,17 +85,18 @@ code_version = 'DCRNN_{}_K{}L{}_{}_F{}'.format(''.join([e[0] for e in args.Graph
                                            args.K, args.L, args.CodeVersion, int(args.MergeIndex)*5)
 
 data_loader = my_data_loader(dataset=args.Dataset, city=args.City,
+                             test_ratio=float(args.test_ratio),
                              data_range=args.DataRange, train_data_length=args.TrainDays,
                              closeness_len=int(args.CT), period_len=int(args.PT), trend_len=int(args.TT),
                              threshold_interaction=args.TI, threshold_distance=args.TD,
                              threshold_correlation=args.TC, graph=args.Graph, with_lm=True, normalize=True, MergeIndex=args.MergeIndex,
-                             MergeWay="max" if args.Dataset == "ChargeStation" else "sum")
+                             MergeWay=args.MergeWay)
 
 print('Code version', args.Dataset, args.City, code_version)
 
 print('Number of training samples', data_loader.train_sequence_len)
 
-diffusion_matrix = data_loader.diffusion_matrix(filter_type='dual_random_walk')
+diffusion_matrix = data_loader.diffusion_matrix()
 
 DCRNN_Obj = DCRNN(num_nodes=data_loader.station_number,
                   num_diffusion_matrix=diffusion_matrix.shape[0],
